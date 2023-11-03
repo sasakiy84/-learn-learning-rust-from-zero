@@ -79,3 +79,97 @@ fn parse_plus_star_question(
         Err(ParseError::NoPrev(pos))
     }
 }
+
+/// convert expressions combined by Or
+fn fold_or(mut seq_or: Vec<AST>) -> Option<AST> {
+    if seq_or.len() > 1 {
+        let mut ast = seq_or.pop().unwrap();
+        seq_or.reverse();
+        for s in seq_or {
+            ast = AST::Or(Box::new(s), Box::new(ast));
+        }
+        Some(ast)
+    } else {
+        seq_or.pop()
+    }
+}
+
+/// convert regular expresiion into ast
+pub fn parse(expr: &str) -> Result<AST, ParseError> {
+    /// type representing internal state
+    /// Char state: processing Strings
+    /// Escape state: processing Escape sequence
+    enum ParseState {
+        Char,
+        Escape,
+    }
+
+    let mut seq = Vec::new(); // current seq context
+    let mut seq_or = Vec::new(); // current Or context
+    let mut stack = Vec::new(); // context stack
+    let mut state = ParseState::Char;
+
+    for (i, c) in expr.chars().enumerate() {
+        match &state {
+            ParseState::Char => {
+                match c {
+                    '+' => parse_plus_star_question(&mut seq, PSQ::Plus, i)?,
+                    '*' => parse_plus_star_question(&mut seq, PSQ::Star, i)?,
+                    '?' => parse_plus_star_question(&mut seq, PSQ::Question, i)?,
+                    '(' => {
+                        let prev = take(&mut seq);
+                        let prev_or = take(&mut seq_or);
+                        stack.push((prev, prev_or));
+                    }
+                    ')' => {
+                        // pop current context from stack
+                        if let Some((mut prev, prev_or)) = stack.pop() {
+                            if !seq.is_empty() {
+                                seq_or.push(AST::Seq(seq));
+                            }
+
+                            if let Some(ast) = fold_or(seq_or) {
+                                prev.push(ast);
+                            }
+
+                            seq = prev;
+                            seq_or = prev_or;
+                        } else {
+                            // error when open parenthesis does not exist, like "abc)"
+                            return Err(ParseError::InvalidRightParen(i));
+                        }
+                    }
+                    '|' => {
+                        if seq.is_empty() {
+                            return Err(ParseError::NoPrev(i));
+                        } else {
+                            let prev = take(&mut seq);
+                            seq_or.push(AST::Seq(prev));
+                        }
+                    }
+                    '\\' => state = ParseState::Escape,
+                    _ => seq.push(AST::Char(c)),
+                }
+            }
+            ParseState::Escape => {
+                let ast = parse_escape(i, c)?;
+                seq.push(ast);
+                state = ParseState::Char;
+            }
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err(ParseError::NoRightParen);
+    }
+
+    if !seq.is_empty() {
+        seq_or.push(AST::Seq(seq))
+    }
+
+    if let Some(ast) = fold_or(seq_or) {
+        Ok(ast)
+    } else {
+        Err(ParseError::Empty)
+    }
+}
