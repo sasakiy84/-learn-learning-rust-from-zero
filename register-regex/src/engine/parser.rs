@@ -6,6 +6,7 @@ use std::{
 };
 
 /// type representing AST
+#[derive(Debug)]
 pub enum AST {
     Char(char),
     Plus(Box<AST>),
