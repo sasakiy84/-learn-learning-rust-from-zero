@@ -1,18 +1,27 @@
-use std::{sync::mpsc::{channel, sync_channel, Sender, Receiver, SyncSender}, process::exit, thread};
-
 use crate::helper::DynError;
 use nix::{
+    libc,
     sys::{
         signal::{killpg, signal, SigHandler, Signal},
         wait::{waitpid, WaitPidFlag, WaitStatus},
     },
     unistd::{self, dup2, execvp, fork, pipe, setpgid, tcgetpgrp, tcsetpgrp, ForkResult, Pid},
 };
-use rustyline::{ DefaultEditor, error::ReadlineError};
+use rustyline::{error::ReadlineError, DefaultEditor};
 use signal_hook::{consts::*, iterator::Signals};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    ffi::CString,
+    mem::replace,
+    path::PathBuf,
+    process::exit,
+    sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender},
+    thread,
+};
 
 fn syscall<F, T>(f: F) -> Result<T, nix::Error>
-where F: Fn() -> Result<T, nix::Error>
+where
+    F: Fn() -> Result<T, nix::Error>,
 {
     loop {
         match f() {
@@ -31,7 +40,7 @@ enum WorkerMsg {
 /// message main threads receive
 enum ShellMsg {
     Continue(i32), // restart shell loading. i32 is last exit code.
-    Quit(i32), // terminate shell. i32 is shell exit code.
+    Quit(i32),     // terminate shell. i32 is shell exit code.
 }
 
 #[derive(Debug)]
@@ -41,14 +50,14 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(logfile: &str) -> Self {
-        Shell { logfile: logfile.to_string() }
+        Shell {
+            logfile: logfile.to_string(),
+        }
     }
 
     pub fn run(&self) -> Result<(), DynError> {
         // ignore SITTTOU, or deliver SIGTSTP
-        unsafe {
-            signal(Signal::SITTTOU, SigHandler::SigIgn).unwrap()
-        };
+        unsafe { signal(Signal::SITTTOU, SigHandler::SigIgn).unwrap() };
 
         let mut rl = DefaultEditor::new()?;
         if let Err(e) = rl.load_history(&self.logfile) {
@@ -75,7 +84,6 @@ impl Shell {
                     } else {
                         rl.add_history_entry(line_trimed);
                     }
-
 
                     // send message to workder thread
                     worker_tx.send(WorkerMsg::Cmd(line)).unwrap();
@@ -126,16 +134,87 @@ fn spawn_sig_handler(tx: Sender<WorkerMsg>) -> Result<(), DynError> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum ProcState {
+    Run,
+    Stop,
+}
+
+#[derive(Debug, Clone)]
+struct ProcInfo {
+    state: ProcState,
+    gpid: Pid,
+}
+
 #[derive(Debug)]
-struct Worker {}
+struct Worker {
+    exit_val: i32,
+    fg: Option<Pid>, // foreground process group id
+
+    jobs: BTreeMap<usize, (Pid, String)>, // mappping job id to (process group id, command)
+
+    pgid_top_pids: HashMap<Pid, (usize, HashSet<Pid>)>, // mapping process group id to (job id,
+    // process id)
+    pid_to_info: HashMap<Pid, ProcInfo>,
+    shell_pgid: Pid,
+}
 
 impl Worker {
     fn new() -> Self {
-        todo!()
+        Worker {
+            exit_val: 0,
+            fg: None, // foreground is shell
+            jobs: BTreeMap::new(),
+            pgid_top_pids: HashMap::new(),
+            pid_to_info: HashMap::new(),
+            shell_pgid: tcgetpgrp(libc::STDIN_FILENO).unwrap(),
+        }
     }
 
     fn spawn(&self, worker_rx: Receiver<WorkerMsg>, shell_tx: SyncSender<ShellMsg>) {
+        thread::spawn(move || {
+            for msg in worker_rx.iter() {
+                match msg {
+                    WorkerMsg::Cmd(line) => {
+                        match parse_cmd(&line) {
+                            Ok(cmd) => {
+                                if self.build_in_cmd(&cmd, &shell_tx) {
+                                    // if buildin cmd, receive from worker_rx
+                                    continue;
+                                }
+
+                                // if failed to spawn child process, wait input again
+                                if !self.spawn_child(&line, &cmd) {
+                                    shell_tx.send(ShellMsg::Continue(self.exit_val)).unwrap();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("ZeroSh: {e}");
+                                shell_tx.send(ShellMsg::Continue(self.exit_val)).unwrap();
+                            }
+                        }
+                    }
+                    WorkerMsg::Signal(SIGCHLD) => self.wait_child(&shell_tx),
+                    _ => (), // do nothing
+                }
+            }
+        });
+    }
+
+    fn wait_child(&self, shell_tx: &SyncSender<ShellMsg>) {
+        todo!();
+    }
+
+    fn build_in_cmd(&mut self, cmd: &[(&str, Vec<&str>)], shell_tx: &SyncSender<ShellMsg>) -> bool {
+        todo!()
+    }
+
+    fn spawn_child(&mut self, line: &str, cmd: &[(&str, Vec<&str>)]) -> bool {
         todo!()
     }
 }
 
+type CmdResult<'a> = Result<Vec<(&'a str, Vec<&'a str>)>, DynError>;
+fn parse_cmd(line: &str) -> CmdResult {
+    todo!()
+}
